@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Carry BetterDiscord themes across Discord's CSS class renames.
+
+Discord's class names are `name_<hash>`, the hash shared by one CSS module. When a client update
+changes the hashes, every theme selector using them stops matching. ClassSync (the BetterDiscord
+plugin) records the classes of each client build; this tool compares the build the theme was
+written against with the current one and rewrites the theme's classes:
+
+  1. module match: a vanished module (its set of class names) is matched to a module that is new
+     in this build when their name sets are similar (Jaccard >= 0.5) and each is the other's
+     unambiguous best match; look-alike tiny modules ({container}) tie and are refused. A module
+     that Discord split in two (both close) becomes :is(.a, .b).
+  2. sibling match: a class never recorded follows the classes of its old hash that did match,
+     when `name_<new hash>` exists.
+Anything else is left as it is. A recorded class with no match yet is "pending": its module may simply
+not be loaded in this session yet (a settings page never opened), so it is retried whenever ClassSync
+records more of the build, and only real rewrites are announced. Dry run unless --apply.
+"""
+import argparse
+import collections
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+HOME = Path.home()
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state")
+DEFAULT_DATA = CONFIG_HOME / "BetterDiscord/data/class-sync"
+DEFAULT_CONFIG = CONFIG_HOME / "bd-class-sync/config.toml"
+DEFAULT_TARGETS = [str(CONFIG_HOME / "BetterDiscord/themes/*.theme.css")]
+
+HASHED = re.compile(r"^([A-Za-z][\w-]*?)_{1,2}([\w-]{5,6})$")  # same split as the plugin
+# A class in a selector, including the later ones of a compound (.a_x.b_y). A number (0.5) never
+# matches: the name must start with a letter.
+TOKEN = re.compile(r"\.([A-Za-z][\w-]*)(?![\w-])")
+MIN_SCORE = 0.5
+MARGIN = 0.1
+
+
+def split(cls):
+    m = HASHED.match(cls)
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def jaccard(a, b):
+    return len(a & b) / len(a | b) if a or b else 0.0
+
+
+class Builds:
+    """The recorded builds: the current one (latest.json) and the older ones, newest first."""
+
+    def __init__(self, data_dir):
+        latest = json.loads((data_dir / "latest.json").read_text())
+        self.current_id = latest["build"]
+        builds = {}
+        for f in (data_dir / "builds").glob("*.json"):
+            b = json.loads(f.read_text())
+            builds[b["build"]] = b
+        if self.current_id not in builds:
+            raise SystemExit(f"latest.json names build {self.current_id}, which has no record")
+        self.current = builds.pop(self.current_id)
+        self.older = sorted(builds.values(), key=lambda b: b.get("lastSeen", ""), reverse=True)
+        self.live = {c for classes in self.current["modules"].values() for c in classes}
+        modules = lambda b: {h: frozenset(split(c)[0] for c in classes) for h, classes in b["modules"].items()}
+        current = modules(self.current)
+        old = {}
+        for b in self.older:  # newest first: a hash keeps its newest record
+            for h, names in modules(b).items():
+                old.setdefault(h, names)
+        # Only a module whose hash is new can be a renamed one, and only an old module whose hash is
+        # gone can have been renamed; a hash present in both builds is the same module.
+        self.new_mods = {h: n for h, n in current.items() if h not in old}
+        self.old_mods = {h: n for h, n in old.items() if h not in current}
+        self.class_in = {(h, split(c)[0]): c for h, classes in self.current["modules"].items() for c in classes}
+        self.old_hash = {c: h for b in reversed(self.older) for h, classes in b["modules"].items() for c in classes}
+        self.new_by_name, self.old_by_name = collections.defaultdict(set), collections.defaultdict(set)
+        for h, names in self.new_mods.items():
+            for n in names:
+                self.new_by_name[n].add(h)
+        for h, names in self.old_mods.items():
+            for n in names:
+                self.old_by_name[n].add(h)
+        self._prefers = {}
+
+    def prefers(self, new_hash):
+        """The old modules a new module resembles most: (score, [old hashes])."""
+        if new_hash not in self._prefers:
+            names = self.new_mods[new_hash]
+            scores = {o: jaccard(names, self.old_mods[o]) for n in names for o in self.old_by_name.get(n, ())}
+            best = max(scores.values(), default=0.0)
+            self._prefers[new_hash] = (best, [o for o, s in scores.items() if s == best])
+        return self._prefers[new_hash]
+
+    def successors(self, old_hash):
+        """The new modules an old (vanished) module became; empty when that is not certain.
+
+        A candidate must be similar enough, close to the best candidate, and prefer this old module
+        alone in return. Many tiny modules share the same names ({container}, {container, wrapper}):
+        those tie in return and are refused rather than guessed."""
+        names = self.old_mods.get(old_hash)
+        if names is None:
+            return []
+        scores = {h: jaccard(names, self.new_mods[h]) for n in names for h in self.new_by_name.get(n, ())}
+        best = max(scores.values(), default=0.0)
+        if best < MIN_SCORE:
+            return []
+        close = [h for h, s in scores.items() if s >= max(MIN_SCORE, best - MARGIN)]
+        return sorted(h for h in close if self.prefers(h) == (scores[h], [old_hash]))
+
+
+def resolve(builds, classes):
+    """Map stale classes to selectors. Returns (mapping, how, pending)."""
+    mapping, how, pending = {}, {}, []
+    stale = sorted(c for c in classes if c not in builds.live and split(c)[0])
+    for cls in stale:
+        old_hash = builds.old_hash.get(cls)
+        if old_hash is None:
+            continue  # never recorded: left to the sibling pass
+        name = split(cls)[0]
+        targets = [builds.class_in[(h, name)] for h in builds.successors(old_hash) if (h, name) in builds.class_in]
+        if not targets:
+            continue
+        mapping[cls] = "." + targets[0] if len(targets) == 1 else ":is(" + ", ".join("." + c for c in targets) + ")"
+        how[cls] = "module"
+    # sibling pass: an old hash whose matched classes all moved to one new hash
+    moved = collections.defaultdict(set)
+    for cls, sel in mapping.items():
+        if sel.startswith("."):
+            moved[split(cls)[1]].add(split(sel[1:])[1])
+    for cls in stale:
+        if cls in mapping:
+            continue
+        name, old_hash = split(cls)
+        targets = moved.get(old_hash, set())
+        if len(targets) == 1:
+            cand = f"{name}_{next(iter(targets))}"
+            if cand in builds.live:
+                mapping[cls], how[cls] = "." + cand, "sibling"
+                continue
+        if cls in builds.old_hash:
+            pending.append(cls)  # recorded before, not matched (yet) in this build
+    return mapping, how, pending
+
+
+def expand(patterns):
+    files = []
+    for p in patterns:
+        p = os.path.expanduser(p)
+        matches = sorted(Path("/").glob(p.lstrip("/"))) if any(ch in p for ch in "*?[") else [Path(p)]
+        files += [f for f in matches if f.is_file()]
+    return files
+
+
+def notify(summary, body):
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-a", "Discord", summary, body], check=False)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("files", nargs="*", help="theme files (default: config targets, else BetterDiscord/themes/*.theme.css)")
+    ap.add_argument("--apply", action="store_true", help="rewrite the files (a backup of each is kept)")
+    ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    ap.add_argument("--data", type=Path, help=f"ClassSync's data directory (default {DEFAULT_DATA})")
+    ap.add_argument("--quiet", action="store_true", help="no desktop notification")
+    args = ap.parse_args()
+
+    config = tomllib.loads(args.config.read_text()) if args.config.is_file() else {}
+    data_dir = args.data or Path(os.path.expanduser(config.get("data", str(DEFAULT_DATA))))
+    files = [Path(f) for f in args.files] or expand(config.get("targets", DEFAULT_TARGETS))
+    if not (data_dir / "latest.json").is_file():
+        sys.exit(f"No ClassSync data in {data_dir}: is the ClassSync plugin enabled?")
+    builds = Builds(data_dir)
+    if not builds.older:
+        print(f"Only one build recorded ({builds.current_id}); nothing to compare yet.")
+        return
+
+    texts = {f: f.read_text() for f in files}
+    used = {m.group(1) for t in texts.values() for m in TOKEN.finditer(t)}
+    mapping, how, pending = resolve(builds, used)
+
+    changed = {}
+    for f, text in texts.items():
+        count = 0
+
+        def sub(m):
+            nonlocal count
+            sel = mapping.get(m.group(1))
+            if sel is None:
+                return m.group(0)
+            count += 1
+            return sel
+        new = TOKEN.sub(sub, text)
+        if count:
+            changed[f] = (new, count)
+
+    print(f"Build {builds.current_id} (compared with {len(builds.older)} older)")
+    for cls, sel in sorted(mapping.items()):
+        print(f"  {cls:40} -> {sel}   [{how[cls]}]")
+    for cls in pending:
+        print(f"  {cls:40} -> ?   [pending: not matched in this build yet]")
+    for f, (_, n) in changed.items():
+        print(f"{'Rewriting' if args.apply else 'Would rewrite'} {f}: {n} occurrences")
+    if not args.apply:
+        return
+
+    backups = STATE_HOME / "bd-class-sync/backups"
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for f, (new, _) in changed.items():
+        backups.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, backups / f"{stamp}-{f.name}")
+        with tempfile.NamedTemporaryFile("w", dir=f.parent, delete=False, prefix=f".{f.name}.") as tmp:
+            tmp.write(new)
+        shutil.copymode(f, tmp.name)
+        os.replace(tmp.name, f)
+    post = config.get("post")
+    if changed and post:
+        cmd = post if isinstance(post, list) else shlex.split(post)
+        result = subprocess.run([os.path.expanduser(c) for c in cmd], check=False)
+        if result.returncode:
+            print(f"post command failed ({result.returncode}): {cmd}", file=sys.stderr)
+
+    report_file = data_dir / "report.json"
+    if changed:
+        report = {"time": datetime.datetime.now().astimezone().isoformat(), "build": builds.current_id,
+                  "mapped": mapping, "pending": pending, "files": {str(f): n for f, (_, n) in changed.items()}}
+        report_file.write_text(json.dumps(report, indent=1))
+        if not args.quiet:
+            body = f"{len(mapping)} theme classes updated" + (f"; {len(pending)} still pending" if pending else "")
+            notify("Discord renamed its CSS classes", body + ".")
+
+
+if __name__ == "__main__":
+    main()

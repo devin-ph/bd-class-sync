@@ -1,0 +1,10 @@
+[Unit]
+Description=Remap theme classes when ClassSync records a new Discord build or more of it
+
+[Path]
+# ClassSync rewrites latest.json only when the build changes or it finds new modules.
+PathChanged=%h/.config/BetterDiscord/data/class-sync/latest.json
+Unit=bd-class-remap.service
+
+[Install]
+WantedBy=default.target

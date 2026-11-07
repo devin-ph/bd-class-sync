@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-inject BetterDiscord into the newest Discord host
+# A host that cannot be injected (BetterDiscord missing) keeps its app.asar and would retrigger the
+# path unit; three failures a minute stop it instead of looping.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bd-reinject

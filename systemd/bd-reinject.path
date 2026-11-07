@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-inject BetterDiscord when Discord installs a new host version
+
+[Path]
+# Only an uninjected host has resources/app.asar (injection renames it), so this fires once per
+# Discord update and is quiet otherwise.
+PathExistsGlob=%h/.config/discord/app-*/resources/app.asar
+PathExistsGlob=%h/.config/discordptb/app-*/resources/app.asar
+PathExistsGlob=%h/.config/discordcanary/app-*/resources/app.asar
+Unit=bd-reinject.service
+
+[Install]
+WantedBy=default.target

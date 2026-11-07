@@ -1,0 +1,6 @@
+[Unit]
+Description=Carry BetterDiscord themes across Discord's CSS class renames
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bd-class-remap --apply

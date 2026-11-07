@@ -1,0 +1,13 @@
+# bd-class-remap configuration: copy to ~/.config/bd-class-sync/config.toml (install.sh does this).
+
+# The theme files to keep in step with Discord's class names. Globs are allowed.
+# Default: every BetterDiscord theme.
+targets = ["~/.config/BetterDiscord/themes/*.theme.css"]
+
+# If your theme is generated from a template (e.g. by a wallpaper/colour pipeline), point `targets`
+# at the template instead and regenerate afterwards with `post`, run once after a rewrite:
+# targets = ["~/.config/wallust/templates/discord.theme.css"]
+# post = ["theme-update", "--generate-only"]
+
+# Where ClassSync keeps its records (default shown).
+# data = "~/.config/BetterDiscord/data/class-sync"

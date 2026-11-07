@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# bd-reinject: put BetterDiscord back into a Discord host that its updater just installed.
+#
+# Discord installs each host version into a new $XDG_CONFIG_HOME/<flavour>/app-<version>/ directory,
+# without BetterDiscord. This applies BetterDiscord's own injection to the newest one: the client's
+# resources/app.asar becomes betterdiscord.app.asar, and resources/app/index.js loads BetterDiscord
+# and then that asar. Already injected: nothing to do. Run by bd-reinject.path whenever an
+# uninjected resources/app.asar appears; safe to run by hand at any time.
+set -euo pipefail
+
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+bd_asar="$config_home/BetterDiscord/data/betterdiscord.asar"
+injected=()
+
+say() { printf '%s\n' "$*"; }
+
+if [ ! -f "$bd_asar" ]; then
+    say "BetterDiscord is not installed ($bd_asar is missing); install it first." >&2
+    exit 1
+fi
+
+# Wait until the updater has finished writing: the file exists and its size holds for 3 s.
+settled() {
+    local file=$1 last=-1 size
+    for _ in $(seq 1 60); do
+        size=$(stat -c %s "$file" 2>/dev/null || echo -1)
+        if [ "$size" -gt 0 ] && [ "$size" = "$last" ]; then return 0; fi
+        last=$size
+        sleep 3
+    done
+    return 1
+}
+
+inject() {
+    local resources=$1 app=$1/app
+    if [ -f "$app/index.js" ] && grep -q 'betterdiscord.asar' "$app/index.js"; then
+        return 0
+    fi
+    if [ -f "$resources/app.asar" ]; then
+        settled "$resources/app.asar" || { say "$resources/app.asar is still changing; try again later." >&2; return 1; }
+        mv "$resources/app.asar" "$resources/betterdiscord.app.asar"
+    fi
+    if [ ! -f "$resources/betterdiscord.app.asar" ]; then
+        say "No client asar in $resources; not a Discord host?" >&2
+        return 1
+    fi
+    mkdir -p "$app"
+    printf 'require(%s);\nrequire("../betterdiscord.app.asar");\n' \
+        "$(printf '%s/main.js' "$bd_asar" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" > "$app/index.js"
+    printf '{"name":"discord","main":"index.js"}\n' > "$app/package.json"
+    injected+=("$resources")
+}
+
+status=0
+for flavour in discord discordptb discordcanary discorddevelopment; do
+    dir="$config_home/$flavour"
+    [ -d "$dir" ] || continue
+    newest=$(find "$dir" -maxdepth 1 -type d -name 'app-*' -printf '%f\n' | sort -V | tail -n 1)
+    [ -n "$newest" ] || continue
+    inject "$dir/$newest/resources" || status=1
+done
+
+for r in "${injected[@]}"; do
+    say "BetterDiscord injected into $r"
+done
+if [ ${#injected[@]} -gt 0 ] && command -v notify-send >/dev/null; then
+    notify-send -a Discord "BetterDiscord re-injected" "Discord was updated. Restart Discord to load BetterDiscord again." || true
+fi
+exit $status

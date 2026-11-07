@@ -44,7 +44,7 @@ loaded): 426 of 434 reachable classes remapped correctly, 8 refused as ambiguous
 Requirements: BetterDiscord, Python 3.11+, systemd (user session), `notify-send` (optional).
 
 ```sh
-git clone https://github.com/<you>/bd-class-sync ~/src/bd-class-sync
+git clone https://github.com/devin-ph/bd-class-sync ~/src/bd-class-sync
 ~/src/bd-class-sync/install.sh
 ```
 

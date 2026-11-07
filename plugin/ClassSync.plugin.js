@@ -1,6 +1,10 @@
 /**
  * @name ClassSync
- * @author devin
+ * @author devin-ph
+ * @authorLink https://github.com/devin-ph
+ * @source https://github.com/devin-ph/bd-class-sync
+ * @website https://github.com/devin-ph/bd-class-sync
+ * @updateUrl https://raw.githubusercontent.com/devin-ph/bd-class-sync/main/plugin/ClassSync.plugin.js
  * @version 1.1.0
  * @description Records Discord's CSS class names for every client build, so bd-class-remap can carry your themes across Discord's class renames. Shows a notice when a theme was remapped.
  */

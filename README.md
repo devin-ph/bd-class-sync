@@ -18,7 +18,19 @@ bd-class-sync fixes both, without network access and without guessing:
 | `ClassSync.plugin.js` | BetterDiscord plugin. Records the CSS classes of every Discord build it runs on (`~/.config/BetterDiscord/data/class-sync/`). Shows a notice when your themes were remapped. |
 | `bd-class-remap` | Compares the build your theme was written against with the current one and rewrites the renamed classes in your theme files. A dry run unless `--apply`; backs up every file it changes. |
 | `bd-reinject` | Re-applies BetterDiscord's injection to the newest Discord host. Safe to run at any time. |
+| `host/early-themes.js` | Loaded by the stub `bd-reinject` writes. Shows your enabled themes from Discord's first frame, then hands them back to BetterDiscord (see below). |
 | `systemd/` | User units: re-inject as soon as Discord installs a new host, and remap whenever ClassSync records a new build. |
+
+## Themes from the first frame
+
+BetterDiscord injects themes last: it waits for Discord to connect to its gateway, starts every
+plugin, and only then adds the themes, so each start shows Discord's default look for a few seconds.
+`early-themes.js` runs in Discord's main process. As soon as the main window's page is parsed, it
+adds a copy of each theme that is enabled in BetterDiscord, at the place in the page where
+BetterDiscord puts themes, so the copy cascades the same way. The page removes each copy once
+BetterDiscord has injected that theme itself, and from then on BetterDiscord alone manages it (live
+reload, turning it off). The DevTools console logs both times:
+`[early-themes] <theme>: shown at … ms, BetterDiscord took over at … ms`.
 
 ## How the remap decides
 
@@ -50,6 +62,9 @@ git clone https://github.com/devin-ph/bd-class-sync ~/src/bd-class-sync
 
 Then enable **ClassSync** in Discord (Settings → Plugins). Its first record is a baseline; from the
 next Discord update on, renames are handled automatically.
+
+`install.sh` also brings a host injected by an older version up to date; the new stub takes effect
+at Discord's next start.
 
 Uninstall: `install.sh --uninstall` (keeps your config and the records).
 

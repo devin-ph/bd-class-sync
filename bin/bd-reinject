@@ -3,14 +3,17 @@
 #
 # Discord installs each host version into a new $XDG_CONFIG_HOME/<flavour>/app-<version>/ directory,
 # without BetterDiscord. This applies BetterDiscord's own injection to the newest one: the client's
-# resources/app.asar becomes betterdiscord.app.asar, and resources/app/index.js loads BetterDiscord
-# and then that asar. Already injected: nothing to do. Run by bd-reinject.path whenever an
-# uninjected resources/app.asar appears; safe to run by hand at any time.
+# resources/app.asar becomes betterdiscord.app.asar, and resources/app/index.js (the stub) loads
+# BetterDiscord, then early-themes.js (themes from the first frame; skipped if it is not installed),
+# then that asar. Already injected with this stub: nothing to do; an older stub is rewritten. Run by
+# bd-reinject.path whenever an uninjected resources/app.asar appears; safe to run by hand at any time.
 set -euo pipefail
 
 config_home=${XDG_CONFIG_HOME:-$HOME/.config}
 bd_asar="$config_home/BetterDiscord/data/betterdiscord.asar"
+early_themes="${XDG_DATA_HOME:-$HOME/.local/share}/bd-class-sync/early-themes.js"
 injected=()
+refreshed=()
 
 say() { printf '%s\n' "$*"; }
 
@@ -31,9 +34,23 @@ settled() {
     return 1
 }
 
+js_string() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+
+stub() {
+    printf 'require(%s);\n' "$(js_string "$bd_asar/main.js")"
+    printf 'try { require(%s); } catch (e) { if (e.code !== "MODULE_NOT_FOUND") console.error(e); }\n' \
+        "$(js_string "$early_themes")"
+    printf 'require("../betterdiscord.app.asar");\n'
+}
+
 inject() {
-    local resources=$1 app=$1/app
+    local resources=$1 app=$1/app want
+    want=$(stub)
     if [ -f "$app/index.js" ] && grep -q 'betterdiscord.asar' "$app/index.js"; then
+        if [ "$(cat "$app/index.js")" != "$want" ]; then
+            printf '%s\n' "$want" > "$app/index.js"
+            refreshed+=("$resources")
+        fi
         return 0
     fi
     if [ -f "$resources/app.asar" ]; then
@@ -45,8 +62,7 @@ inject() {
         return 1
     fi
     mkdir -p "$app"
-    printf 'require(%s);\nrequire("../betterdiscord.app.asar");\n' \
-        "$(printf '%s/main.js' "$bd_asar" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" > "$app/index.js"
+    printf '%s\n' "$want" > "$app/index.js"
     printf '{"name":"discord","main":"index.js"}\n' > "$app/package.json"
     injected+=("$resources")
 }
@@ -62,6 +78,9 @@ done
 
 for r in "${injected[@]}"; do
     say "BetterDiscord injected into $r"
+done
+for r in "${refreshed[@]}"; do
+    say "Updated the stub in $r/app; Discord uses it from its next start"
 done
 if [ ${#injected[@]} -gt 0 ] && command -v notify-send >/dev/null; then
     notify-send -a Discord "BetterDiscord re-injected" "Discord was updated. Restart Discord to load BetterDiscord again." || true
